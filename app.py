@@ -148,7 +148,7 @@ def identify_trend_changes(df, L, R, f):
     df['has_turn'] = has_turn
     return df
 
-# ----------------- Punkt-Zyklus-Scanner (Exakt & Toleranz) mit Offset-Tracking -----------------
+# ----------------- Punkt-Zyklus-Scanner (Erweitert mit Detail-Informationen je Zyklus) -----------------
 def evaluate_turning_points(df_sub, min_n, max_n, c_count):
     turns_array = df_sub['has_turn'].values
     timestamps = df_sub.index
@@ -161,12 +161,14 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
     
     for pt_num, t_idx in enumerate(turn_indices, start=1):
         best_exact_pct = -1.0
-        best_exact_cycles = []
-        best_exact_offset = 0
+        best_exact_details = [] # Speichert formatierte Strings für N, Offset und Position
+        best_exact_primary_N = min_n
+        best_exact_primary_offset = 0
         
         best_tol_pct = -1.0
-        best_tol_cycles = []
-        best_tol_offset = 0
+        best_tol_details = []
+        best_tol_primary_N = min_n
+        best_tol_primary_offset = 0
         
         for N in range(int(min_n), int(max_n) + 1):
             max_exact_for_N = -1.0
@@ -200,18 +202,28 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
                     best_off_tol = offset
             
             if max_exact_for_N >= 0:
+                pos_calc = (t_idx - best_off_exact) % N
+                detail_str = f"N={N} (Pos {pos_calc}, Offset +{best_off_exact})"
+                
                 if max_exact_for_N > best_exact_pct:
                     best_exact_pct = max_exact_for_N
-                    best_exact_cycles = [N]
-                    best_exact_offset = best_off_exact
+                    best_exact_details = [detail_str]
+                    best_exact_primary_N = N
+                    best_exact_primary_offset = best_off_exact
                 elif np.isclose(max_exact_for_N, best_exact_pct):
-                    best_exact_cycles.append(N)
+                    best_exact_details.append(detail_str)
                     
             if max_tol_for_N >= 0:
+                pos_calc_tol = (t_idx - best_off_tol) % N
+                detail_str_tol = f"N={N} (Pos {pos_calc_tol}, Offset +{best_off_tol})"
+                
                 if max_tol_for_N > best_tol_pct:
                     best_tol_pct = max_tol_for_N
-                    best_tol_cycles = [N]
-                    best_tol_offset = best_off_tol
+                    best_tol_details = [detail_str_tol]
+                    best_tol_primary_N = N
+                    best_tol_primary_offset = best_off_tol
+                elif np.isclose(max_tol_for_N, best_tol_pct):
+                    best_tol_details.append(detail_str_tol)
         
         dt_str = timestamps[t_idx].strftime("%d.%m.%Y %H:%M")
         
@@ -223,9 +235,9 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
                 "Kerzen-Index": t_idx,
                 "Max. Trefferquote (Exakt)": round(best_exact_pct, 1),
                 "Treffer (Zyklen)": f"{exact_hits_cnt} / {c_count}",
-                "Beste Zykluslängen (N)": ", ".join(map(str, best_exact_cycles)),
-                "_raw_N": best_exact_cycles[0] if best_exact_cycles else min_n,
-                "_raw_offset": best_exact_offset,
+                "Beste Zyklen, Positionen & Offsets": "; ".join(best_exact_details),
+                "_raw_N": best_exact_primary_N,
+                "_raw_offset": best_exact_primary_offset,
                 "_raw_pct": best_exact_pct
             })
             
@@ -237,9 +249,9 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
                 "Kerzen-Index": t_idx,
                 "Max. Trefferquote (±1 Toleranz)": round(best_tol_pct, 1),
                 "Treffer (Zyklen)": f"{tol_hits_cnt} / {c_count}",
-                "Beste Zykluslängen (N)": ", ".join(map(str, best_tol_cycles)),
-                "_raw_N": best_tol_cycles[0] if best_tol_cycles else min_n,
-                "_raw_offset": best_tol_offset,
+                "Beste Zyklen, Positionen & Offsets": "; ".join(best_tol_details),
+                "_raw_N": best_tol_primary_N,
+                "_raw_offset": best_tol_primary_offset,
                 "_raw_pct": best_tol_pct
             })
             
