@@ -100,8 +100,8 @@ with st.sidebar:
 
     st.markdown("---")
     st.subheader("📐 PZP-Algorithmus Parameter")
-    pL = int(st.number_input("Pivot Links (L)", min_value=1, value=2))
-    pR = int(st.number_input("Pivot Rechts (R)", min_value=1, value=2))
+    pL = int(st.number_input("Pivot Links (L)", min_value=1, value=1))
+    pR = int(st.number_input("Pivot Rechts (R)", min_value=1, value=1))
     factor = float(st.number_input("Projektionsfaktor", min_value=0.05, value=0.5, step=0.05))
 
     if st.button("🔄 Neu berechnen", width="stretch"):
