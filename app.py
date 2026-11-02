@@ -11,6 +11,14 @@ st.set_page_config(page_title="PZP Cycle Profiler (Toleranz)", page_icon="🎯",
 st.title("🎯 PZP Zyklus-Profiler mit ±1-Kerzen-Toleranz")
 st.caption("Berücksichtigt Markt-Ungenauigkeiten durch optionale ±1-Kerzen-Toleranz (Cluster-Glättung).")
 
+# Session State Initialisierung für die Übernahme in die Hauptansicht
+if 'override_cycle_length' not in st.session_state:
+    st.session_state['override_cycle_length'] = None
+if 'override_offset' not in st.session_state:
+    st.session_state['override_offset'] = None
+if 'override_auto_align' not in st.session_state:
+    st.session_state['override_auto_align'] = None
+
 # US-kompatible Datenquelle (Kraken)
 @st.cache_resource
 def get_exchange():
@@ -46,7 +54,9 @@ with st.sidebar:
     
     st.markdown("---")
     st.subheader("🔁 Zyklus-Einstellungen")
-    cycle_length = st.number_input("Zykluslänge N (in Kerzen)", min_value=3, max_value=120, value=6, step=1)
+    
+    default_cycle_len = st.session_state['override_cycle_length'] if st.session_state['override_cycle_length'] is not None else 6
+    cycle_length = st.number_input("Zykluslänge N (in Kerzen)", min_value=3, max_value=120, value=int(default_cycle_len), step=1)
     cycle_count = st.number_input("Anzahl Zyklen zum Vergleichen", min_value=2, max_value=40, value=10, step=1)
     
     st.markdown("##### 🔍 Zyklus-Scanner (Punkt-Analyse)")
@@ -66,10 +76,13 @@ with st.sidebar:
     with col_t:
         start_time_input = st.time_input("Startuhrzeit (UTC)", value=dt_time(0, 0), step=300)
         
-    auto_align = st.checkbox("🎯 Auto-Phase-Alignment (Startpunkt optimieren)", value=True)
+    default_auto_align = st.session_state['override_auto_align'] if st.session_state['override_auto_align'] is not None else True
+    auto_align = st.checkbox("🎯 Auto-Phase-Alignment (Startpunkt optimieren)", value=default_auto_align)
+    
     manual_offset = 0
     if not auto_align:
-        manual_offset = st.slider("Manueller Start-Offset (Kerzen)", 0, int(cycle_length - 1), 0)
+        default_off = st.session_state['override_offset'] if st.session_state['override_offset'] is not None else 0
+        manual_offset = st.slider("Manueller Start-Offset (Kerzen)", 0, int(cycle_length - 1), int(min(default_off, cycle_length - 1)))
         
     st.markdown("---")
     st.subheader("📐 PZP-Algorithmus Parameter")
@@ -77,7 +90,11 @@ with st.sidebar:
     pR = st.number_input("Pivot Rechts (R)", min_value=1, value=2)
     factor = st.number_input("Projektionsfaktor", min_value=0.05, value=0.5, step=0.05)
     
-    st.button("🔄 Neu berechnen", use_container_width=True)
+    if st.button("🔄 Neu berechnen", use_container_width=True):
+        st.session_state['override_cycle_length'] = None
+        st.session_state['override_offset'] = None
+        st.session_state['override_auto_align'] = None
+        st.rerun()
 
 # ----------------- Daten abrufen -----------------
 def fetch_candles(coin, tf_choice):
@@ -131,13 +148,12 @@ def identify_trend_changes(df, L, R, f):
     df['has_turn'] = has_turn
     return df
 
-# ----------------- Punkt-Zyklus-Scanner (Exakt & Toleranz) -----------------
+# ----------------- Punkt-Zyklus-Scanner (Exakt & Toleranz) mit Offset-Tracking -----------------
 def evaluate_turning_points(df_sub, min_n, max_n, c_count):
     turns_array = df_sub['has_turn'].values
     timestamps = df_sub.index
     total_len = len(turns_array)
     
-    # Alle Indizes finden, an denen ein Trendwendepunkt vorliegt
     turn_indices = np.where(turns_array)[0]
     
     exact_records = []
@@ -146,58 +162,56 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
     for pt_num, t_idx in enumerate(turn_indices, start=1):
         best_exact_pct = -1.0
         best_exact_cycles = []
+        best_exact_offset = 0
         
         best_tol_pct = -1.0
         best_tol_cycles = []
+        best_tol_offset = 0
         
         for N in range(int(min_n), int(max_n) + 1):
-            # Für ein gegebenes N alle möglichen Start-Offsets (0 bis N-1) testen
             max_exact_for_N = -1.0
+            best_off_exact = 0
+            
             max_tol_for_N = -1.0
+            best_off_tol = 0
             
             for offset in range(N):
-                # Prüfen, ob ab diesem Offset genügend Kerzen für c_count Zyklen vorhanden sind
                 if offset + c_count * N > total_len:
                     continue
-                
-                # Prüfen, ob der aktuelle Punkt (t_idx) innerhalb des untersuchten Zyklus-Fensters liegt
                 if not (offset <= t_idx < offset + c_count * N):
                     continue
                 
-                # Position des Punktes innerhalb des Zyklus (0 bis N-1) bestimmen
                 pos = (t_idx - offset) % N
-                
-                # 2D-Matrix der Dimension (c_count, N) für schnelle Auswertung erzeugen
                 window = turns_array[offset : offset + c_count * N].reshape(c_count, N)
                 
-                # 1. Exakte Trefferquote auf der Position des Punktes
+                # Exakt
                 exact_hits = np.sum(window[:, pos])
                 exact_pct = (exact_hits / c_count) * 100.0
                 if exact_pct > max_exact_for_N:
                     max_exact_for_N = exact_pct
+                    best_off_exact = offset
                 
-                # 2. Toleranz (±1) Trefferquote auf (pos-1, pos, pos+1)
+                # Toleranz
                 valid_pos = [(pos - 1) % N, pos, (pos + 1) % N]
                 tol_hits = np.sum(np.any(window[:, valid_pos], axis=1))
                 tol_pct = (tol_hits / c_count) * 100.0
                 if tol_pct > max_tol_for_N:
                     max_tol_for_N = tol_pct
+                    best_off_tol = offset
             
-            # Bestwerte für Exakt aktualisieren
             if max_exact_for_N >= 0:
                 if max_exact_for_N > best_exact_pct:
                     best_exact_pct = max_exact_for_N
                     best_exact_cycles = [N]
+                    best_exact_offset = best_off_exact
                 elif np.isclose(max_exact_for_N, best_exact_pct):
                     best_exact_cycles.append(N)
                     
-            # Bestwerte für ±1 Toleranz aktualisieren
             if max_tol_for_N >= 0:
                 if max_tol_for_N > best_tol_pct:
                     best_tol_pct = max_tol_for_N
                     best_tol_cycles = [N]
-                elif np.isclose(max_tol_for_N, best_tol_pct):
-                    best_tol_cycles.append(N)
+                    best_tol_offset = best_off_tol
         
         dt_str = timestamps[t_idx].strftime("%d.%m.%Y %H:%M")
         
@@ -209,7 +223,10 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
                 "Kerzen-Index": t_idx,
                 "Max. Trefferquote (Exakt)": round(best_exact_pct, 1),
                 "Treffer (Zyklen)": f"{exact_hits_cnt} / {c_count}",
-                "Beste Zykluslängen (N)": ", ".join(map(str, best_exact_cycles))
+                "Beste Zykluslängen (N)": ", ".join(map(str, best_exact_cycles)),
+                "_raw_N": best_exact_cycles[0] if best_exact_cycles else min_n,
+                "_raw_offset": best_exact_offset,
+                "_raw_pct": best_exact_pct
             })
             
         if best_tol_pct >= 0:
@@ -220,7 +237,10 @@ def evaluate_turning_points(df_sub, min_n, max_n, c_count):
                 "Kerzen-Index": t_idx,
                 "Max. Trefferquote (±1 Toleranz)": round(best_tol_pct, 1),
                 "Treffer (Zyklen)": f"{tol_hits_cnt} / {c_count}",
-                "Beste Zykluslängen (N)": ", ".join(map(str, best_tol_cycles))
+                "Beste Zykluslängen (N)": ", ".join(map(str, best_tol_cycles)),
+                "_raw_N": best_tol_cycles[0] if best_tol_cycles else min_n,
+                "_raw_offset": best_tol_offset,
+                "_raw_pct": best_tol_pct
             })
             
     return pd.DataFrame(exact_records), pd.DataFrame(tol_records)
@@ -238,7 +258,6 @@ df = identify_trend_changes(df_raw, pL, pR, factor)
 start_dt = pd.to_datetime(datetime.combine(start_date_input, start_time_input)).tz_localize('UTC')
 df_sub = df[df.index >= start_dt].copy()
 
-# Kopie der ursprünglich gewählten Zyklen-Anzahl für den Scanner speichern
 scanner_cycle_count = int(cycle_count)
 
 if len(df_sub) < (cycle_count * cycle_length + cycle_length):
@@ -262,7 +281,6 @@ for offset in range(int(cycle_length)):
     
     for pos in range(cycle_length):
         if use_tolerance:
-            # Positionen mit zyklischem Wrap-Around: (pos - 1) % N, pos, (pos + 1) % N
             valid_pos = [(pos - 1) % cycle_length, pos, (pos + 1) % cycle_length]
             turns = sub_slice[(sub_slice['Position'].isin(valid_pos)) & (sub_slice['has_turn'] == True)]
         else:
@@ -300,12 +318,10 @@ df_final['Cycle_ID'] = [idx // cycle_length + 1 for idx in range(len(df_final))]
 
 position_stats = []
 for pos in range(cycle_length):
-    # Exakte Treffer
     exact_turns = df_final[(df_final['Position'] == pos) & (df_final['has_turn'] == True)]
     exact_cycles = exact_turns['Cycle_ID'].nunique()
     exact_pct = round((exact_cycles / cycle_count) * 100, 1)
     
-    # Treffer mit ±1 Kerze Toleranz
     valid_pos = [(pos - 1) % cycle_length, pos, (pos + 1) % cycle_length]
     tol_turns = df_final[(df_final['Position'].isin(valid_pos)) & (df_final['has_turn'] == True)]
     tol_cycles = tol_turns['Cycle_ID'].nunique()
@@ -359,7 +375,7 @@ fig.update_layout(
 )
 st.plotly_chart(fig, use_container_width=True)
 
-# Detailansichten (jetzt inkl. Tab 4 für den neuen Punkt-Zyklus-Scanner)
+# Detailansichten
 tab1, tab2, tab3, tab4 = st.tabs([
     "🏆 Rangliste & Matrix", 
     "🔬 Phasen-Vergleich", 
@@ -406,22 +422,47 @@ with tab2:
     )
 
 with tab3:
-    st.markdown("##### Start- und Endzeitpunkte der Zyklen")
+    st.markdown("##### 📅 Start- und Endzeitpunkte sowie Trendwenden der verglichenen Zyklen")
     cycle_times = []
     for cid in range(1, cycle_count + 1):
         c_sub = df_final[df_final['Cycle_ID'] == cid]
-        cycle_times.append({
-            "Zyklus #": cid,
-            "Start": c_sub.index[0].strftime("%d.%m.%Y %H:%M"),
-            "Ende": c_sub.index[-1].strftime("%d.%m.%Y %H:%M")
-        })
+        if not c_sub.empty:
+            turns_in_cycle = c_sub[c_sub['has_turn'] == True].index.strftime("%d.%m.%Y %H:%M").tolist()
+            cycle_times.append({
+                "Zyklus #": cid,
+                "Start": c_sub.index[0].strftime("%d.%m.%Y %H:%M"),
+                "Ende": c_sub.index[-1].strftime("%d.%m.%Y %H:%M"),
+                "Anzahl Kerzen": len(c_sub),
+                "Trendwenden im Zyklus": ", ".join(turns_in_cycle) if turns_in_cycle else "—"
+            })
     st.dataframe(pd.DataFrame(cycle_times), use_container_width=True, hide_index=True)
+    
+    st.markdown("---")
+    st.markdown("##### 🔍 Kerzen-Inspektor je Zyklus (Positionen & Trendwenden)")
+    st.caption("Wähle einen spezifischen Zyklus aus, um die exakte Position (0 bis N-1) jeder einzelnen Kerze einzusehen:")
+    
+    selected_inspect_cycle = st.selectbox(
+        "Zyklus für Detail-Inspektion auswählen", 
+        options=list(range(1, cycle_count + 1)),
+        format_func=lambda x: f"Zyklus {x} (Start: {df_final[df_final['Cycle_ID'] == x].index[0].strftime('%d.%m.%Y %H:%M')})"
+    )
+    
+    inspect_df = df_final[df_final['Cycle_ID'] == selected_inspect_cycle].copy()
+    if not inspect_df.empty:
+        global_indices = [df.index.get_loc(idx) for idx in inspect_df.index]
+        inspect_display = pd.DataFrame({
+            "Kerzen-Position": inspect_df['Position'].values,
+            "Datum / Uhrzeit (UTC)": inspect_df.index.strftime("%d.%m.%Y %H:%M"),
+            "Globaler Kerzen-Index": global_indices,
+            "Trendwende erkannt?": inspect_df['has_turn'].apply(lambda x: "✅ JA" if x else "—")
+        })
+        st.dataframe(inspect_display, use_container_width=True, hide_index=True)
 
 with tab4:
     st.markdown("##### 🎯 Optimale Zykluslängen je historischem Trendwendepunkt")
     st.caption(
-        f"Prüft für jeden aufgetretenen Trendwendepunkt (Punkt 1, Punkt 2, ...) ab dem Startdatum über **{scanner_cycle_count} Zyklen** "
-        f"und alle möglichen Phasen-Offsets, bei welchen Zykluslängen (**N = {scan_min_n} bis {scan_max_n}**) dieser Punkt die höchste Wiederholungsrate erzielt."
+        f"Prüft für jeden aufgetretenen Trendwendepunkt ab dem Startdatum über **{scanner_cycle_count} Zyklen** "
+        f"und alle Phasen-Offsets, bei welchen Zykluslängen (**N = {scan_min_n} bis {scan_max_n}**) dieser Punkt die höchste Wiederholungsrate erzielt."
     )
     
     if scan_min_n > scan_max_n:
@@ -441,12 +482,21 @@ with tab4:
                 "Tipp: Wähle ein früheres Startdatum oder reduziere die 'Anzahl Zyklen zum Vergleichen'."
             )
         else:
+            st.markdown("---")
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                min_filter_pct = st.slider("Mindest-Trefferquote filtern (%)", min_value=0, max_value=100, value=0, step=5)
+            
+            filtered_exact_df = exact_scan_df[exact_scan_df["_raw_pct"] >= min_filter_pct].sort_values(by="_raw_pct", ascending=False)
+            filtered_tol_df = tol_scan_df[tol_scan_df["_raw_pct"] >= min_filter_pct].sort_values(by="_raw_pct", ascending=False)
+            
             col_t1, col_t2 = st.columns(2)
             
             with col_t1:
                 st.markdown("###### 1. Beste Zyklen je Punkt — **Exakt**")
+                display_exact = filtered_exact_df.drop(columns=["_raw_N", "_raw_offset", "_raw_pct"], errors='ignore')
                 st.dataframe(
-                    exact_scan_df,
+                    display_exact,
                     column_config={
                         "Kerzen-Index": st.column_config.NumberColumn("Kerzen-Idx", format="%d"),
                         "Max. Trefferquote (Exakt)": st.column_config.ProgressColumn(
@@ -459,8 +509,9 @@ with tab4:
                 
             with col_t2:
                 st.markdown("###### 2. Beste Zyklen je Punkt — **Mit ±1 Toleranz**")
+                display_tol = filtered_tol_df.drop(columns=["_raw_N", "_raw_offset", "_raw_pct"], errors='ignore')
                 st.dataframe(
-                    tol_scan_df,
+                    display_tol,
                     column_config={
                         "Kerzen-Index": st.column_config.NumberColumn("Kerzen-Idx", format="%d"),
                         "Max. Trefferquote (±1 Toleranz)": st.column_config.ProgressColumn(
@@ -470,3 +521,32 @@ with tab4:
                     use_container_width=True,
                     hide_index=True
                 )
+                
+            st.markdown("---")
+            st.markdown("##### 🚀 Zyklus in Hauptansicht übernehmen")
+            st.caption("Wähle einen Punkt aus, um dessen optimale Zykluslänge und den Start-Offset direkt auf das Haupt-Dashboard zu übertragen:")
+            
+            combined_options = []
+            source_records = tol_scan_df if not tol_scan_df.empty else exact_scan_df
+            
+            for _, row in source_records.iterrows():
+                label = f"{row['Punkt']} ({row['Zeitpunkt']}) — N = {row['_raw_N']} (Offset: +{row['_raw_offset']}) — Quote: {row['_raw_pct']}%"
+                combined_options.append({
+                    "label": label,
+                    "N": int(row['_raw_N']),
+                    "offset": int(row['_raw_offset'])
+                })
+                
+            if combined_options:
+                selected_choice = st.selectbox(
+                    "Punkt / Zyklus zur Übernahme auswählen", 
+                    options=[opt["label"] for opt in combined_options]
+                )
+                
+                if st.button("✨ Gewählten Zyklus & Offset in Hauptansicht anwenden", use_container_width=True):
+                    chosen_item = next(opt for opt in combined_options if opt["label"] == selected_choice)
+                    st.session_state['override_cycle_length'] = chosen_item["N"]
+                    st.session_state['override_offset'] = chosen_item["offset"]
+                    st.session_state['override_auto_align'] = False
+                    st.success(f"Erfolgreich übernommen! Zykluslänge N = {chosen_item['N']}, Offset = +{chosen_item['offset']}. Aktualisiere...")
+                    st.rerun()
